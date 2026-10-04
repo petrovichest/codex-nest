@@ -6513,6 +6513,308 @@ describe("thread settings", () => {
   });
 });
 
+describe("empty-session Team activation", () => {
+  async function createEmptySessionHarness() {
+    const harness = await createForkHarness(0);
+    const created = await harness.app.inject({
+      method: "POST",
+      url: "/api/v1/projects/project/threads",
+      headers: harness.headers,
+      payload: { clientCreationId: "empty-team" },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().thread.id as string;
+    const settings = { collaborationMode: "plan" as const, model: "gpt-a" };
+    await harness.projection.setSettings(id, settings);
+    const draft = await harness.projection.setDraft(id, {
+      input: "Сохранить черновик",
+      images: [{ id: "image", name: "photo.png", url: "data:image/png;base64,AA==" }],
+      annotations: [],
+      goalMode: false,
+    });
+    return { ...harness, id, settings, draft };
+  }
+
+  it.each(
+    [true, false].flatMap((unmaterialized) =>
+      [
+        "no rollout found for thread id created",
+        "invalid paginated history lineage for created: missing source rollout",
+      ].map((message) => ({ unmaterialized, message })),
+    ),
+  )(
+    "recovers the same empty session after $message (unmaterialized=$unmaterialized)",
+    async ({ unmaterialized, message }) => {
+      const { app, bridge, headers, store, projection, id } = await createEmptySessionHarness();
+      try {
+        const upload = await app.inject({
+          method: "POST",
+          url: `/api/v1/threads/${id}/attachments?name=notes.txt&mediaType=text%2Fplain`,
+          headers: { ...headers, "content-type": "application/octet-stream" },
+          payload: Buffer.from("Keep this attachment"),
+        });
+        expect(upload.statusCode).toBe(201);
+        const file = upload.json();
+        const draft = await projection.setDraft(id, {
+          ...store.view().threadMeta[id]!.draft!,
+          files: [file],
+        });
+        projection.upsertThread({
+          ...testThread(id),
+          name: "Моя сессия",
+          gitInfo: { sha: "existing-sha", branch: "main", originUrl: null },
+        });
+        if (unmaterialized) await projection.markUnmaterialized(id);
+        const original = bridge.request.getMockImplementation()!;
+        bridge.request.mockClear();
+        let persisted = false;
+        bridge.request.mockImplementation(async (method, params = {}) => {
+          if (method === "thread/resume" && params.threadId === id && !persisted) {
+            throw new RpcError(-32600, message);
+          }
+          const response = await original(method, params);
+          if (method === "thread/read" && params.threadId === id && params.includeTurns === true) {
+            persisted = true;
+          }
+          return response;
+        });
+        const enabled = await app.inject({
+          method: "PATCH",
+          url: `/api/v1/threads/${id}/settings`,
+          headers,
+          payload: { collaborationMode: "team" },
+        });
+        expect(enabled.statusCode, enabled.body).toBe(200);
+        expect(enabled.json()).toMatchObject({
+          id,
+          title: "Моя сессия",
+          settings: { collaborationMode: "team", model: "gpt-a" },
+        });
+        expect(store.view().threadMeta[id]?.draft).toEqual(draft);
+        expect(projection.isUnmaterialized(id)).toBe(false);
+        await expect(readFile(file.path, "utf8")).resolves.toBe("Keep this attachment");
+        expect(
+          bridge.request.mock.calls.filter(
+            ([method]) => method === "thread/read" || method === "thread/resume",
+          ),
+        ).toEqual([
+          [
+            "thread/resume",
+            expect.objectContaining({ config: { agents: { enabled: false } } }),
+            30_000,
+          ],
+          ["thread/read", { threadId: id, includeTurns: true }, 30_000],
+          [
+            "thread/resume",
+            expect.objectContaining({ config: { agents: { enabled: false } } }),
+            30_000,
+          ],
+        ]);
+        expect(bridge.request.mock.calls.some(([method]) => method === "thread/start")).toBe(false);
+        expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+        expect(bridge.request.mock.calls.some(([method]) => method === "thread/name/set")).toBe(
+          false,
+        );
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/metadata/update"),
+        ).toEqual([
+          ["thread/metadata/update", { threadId: id, gitInfo: { sha: "existing-sha" } }, 30_000],
+        ]);
+
+        const send = {
+          method: "POST" as const,
+          url: `/api/v1/threads/${id}/turns`,
+          headers,
+          payload: { input: "Первое сообщение", clientMessageId: "first-team-message" },
+        };
+        expect((await app.inject(send)).statusCode).toBe(201);
+        expect((await app.inject(send)).statusCode).toBe(201);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "turn/start"),
+        ).toHaveLength(1);
+        expect(store.view().threadMeta[id]?.draft).toBeUndefined();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each(["history", "fork", "result", "delivered input", "uncertain input", "unknown origin"])(
+    "does not materialize a session with %s after missing history",
+    async (condition) => {
+      const { app, bridge, headers, store, projection, id, settings, draft } =
+        await createEmptySessionHarness();
+      try {
+        if (condition === "history") {
+          projection.upsertThread({ ...testThread(id), turns: [testTurn("old", "completed")] });
+        } else if (condition === "fork") {
+          projection.upsertThread({ ...testThread(id), forkedFromId: "source" });
+        } else {
+          await store.update((state) => {
+            if (condition === "result") {
+              state.threadMeta[id]!.lastResult = { turnId: "old", completedAt: 1 };
+            } else if (condition === "unknown origin") {
+              state.threadCreations = {};
+            } else {
+              state.messageReceipts ??= {};
+              state.messageReceipts.previous = {
+                threadId: id,
+                turnId: condition === "delivered input" ? "old" : null,
+                contentHash: messageContentHash("Previous input", [], [], false),
+                createdAt: 1,
+                status: condition === "delivered input" ? "delivered" : "prepared",
+              };
+            }
+          });
+        }
+        const original = bridge.request.getMockImplementation()!;
+        bridge.request.mockClear();
+        bridge.request.mockImplementation(async (method, params = {}) => {
+          if (method === "thread/resume" && params.threadId === id) {
+            throw new RpcError(
+              -32600,
+              `invalid paginated history lineage for ${id}: missing source rollout`,
+            );
+          }
+          return original(method, params);
+        });
+        const failed = await app.inject({
+          method: "PATCH",
+          url: `/api/v1/threads/${id}/settings`,
+          headers,
+          payload: { collaborationMode: "team" },
+        });
+        expect(failed.statusCode).toBe(500);
+        expect(projection.summary(id)?.settings).toEqual(settings);
+        expect(store.view().threadMeta[id]?.draft).toEqual(draft);
+        expect(bridge.request.mock.calls.some(([method]) => method === "thread/read")).toBe(false);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/resume"),
+        ).toHaveLength(1);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each(["materialization", "second resume"])(
+    "preserves the mode and draft after failed %s without retrying again",
+    async (stage) => {
+      const { app, bridge, headers, store, projection, id, settings, draft } =
+        await createEmptySessionHarness();
+      try {
+        await projection.markUnmaterialized(id);
+        const original = bridge.request.getMockImplementation()!;
+        bridge.request.mockClear();
+        bridge.request.mockImplementation(async (method, params = {}) => {
+          if (params.threadId === id) {
+            if (method === "thread/resume") {
+              throw new RpcError(
+                -32600,
+                `invalid paginated history lineage for ${id}: missing source rollout`,
+              );
+            }
+            if (method === "thread/read" && stage === "materialization") {
+              throw new Error("History persistence failed");
+            }
+          }
+          return original(method, params);
+        });
+        const failed = await app.inject({
+          method: "PATCH",
+          url: `/api/v1/threads/${id}/settings`,
+          headers,
+          payload: { collaborationMode: "team" },
+        });
+        expect(failed.statusCode).toBe(500);
+        expect(projection.summary(id)?.settings).toEqual(settings);
+        expect(store.view().threadMeta[id]?.draft).toEqual(draft);
+        expect(projection.isUnmaterialized(id)).toBe(stage === "materialization");
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/read"),
+        ).toHaveLength(1);
+        expect(
+          bridge.request.mock.calls.filter(([method]) => method === "thread/resume"),
+        ).toHaveLength(stage === "materialization" ? 1 : 2);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    "invalid paginated history lineage for created: cycle detected",
+    "invalid paginated history lineage for another-thread: missing source rollout",
+  ])("does not materialize an empty session after unrelated failure: %s", async (message) => {
+    const { app, bridge, headers, projection, id, settings } = await createEmptySessionHarness();
+    try {
+      const original = bridge.request.getMockImplementation()!;
+      bridge.request.mockClear();
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (method === "thread/resume") throw new RpcError(-32600, message);
+        return original(method, params);
+      });
+      const failed = await app.inject({
+        method: "PATCH",
+        url: `/api/v1/threads/${id}/settings`,
+        headers,
+        payload: { collaborationMode: "team" },
+      });
+      expect(failed.statusCode).toBe(500);
+      expect(projection.summary(id)?.settings).toEqual(settings);
+      expect(bridge.request.mock.calls.some(([method]) => method === "thread/read")).toBe(false);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("retries failed empty-session persistence with the same creation ID and keeps its draft", async () => {
+    const { app, bridge, headers, store, projection } = await createForkHarness(0);
+    try {
+      const original = bridge.request.getMockImplementation()!;
+      let failRead = true;
+      bridge.request.mockImplementation(async (method, params = {}) => {
+        if (method === "thread/read" && params.threadId === "created" && failRead) {
+          failRead = false;
+          throw new Error("Empty history persistence failed");
+        }
+        return original(method, params);
+      });
+      const request = {
+        method: "POST" as const,
+        url: "/api/v1/projects/project/threads",
+        headers,
+        payload: { clientCreationId: "retry-empty-team" },
+      };
+      expect((await app.inject(request)).statusCode).toBe(500);
+      expect(projection.isUnmaterialized("created")).toBe(true);
+      const draft = await projection.setDraft("created", {
+        input: "Черновик после сбоя",
+        images: [],
+        annotations: [],
+        goalMode: false,
+      });
+      const retried = await app.inject(request);
+      expect(retried.statusCode, retried.body).toBe(201);
+      expect(retried.json()).toMatchObject({ thread: { id: "created" }, draft });
+      expect(projection.isUnmaterialized("created")).toBe(false);
+      expect(store.view().threadMeta.created?.draft).toEqual(draft);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/start"),
+      ).toHaveLength(1);
+      expect(bridge.request.mock.calls.filter(([method]) => method === "thread/read")).toHaveLength(
+        2,
+      );
+      expect(bridge.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+      expect(
+        bridge.request.mock.calls.filter(([method]) => method === "thread/metadata/update"),
+      ).toHaveLength(2);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe("browser thread lifecycle", () => {
   it("requires explicit opt-in, rejects busy changes, rolls back attach, and fully disables", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codexnest-browser-api-test-"));
@@ -10037,6 +10339,12 @@ describe.each([1, 0])("reliable first messages (delivery version %s)", (delivery
       ).toHaveLength(1);
       expect(
         bridge.request.mock.calls.filter(([method]) => method === "thread/metadata/update"),
+      ).toHaveLength(deliveryVersion === 1 ? 0 : 1);
+      expect(
+        bridge.request.mock.calls.filter(
+          ([method, params]) =>
+            method === "thread/read" && params.threadId === id && params.includeTurns === true,
+        ),
       ).toHaveLength(deliveryVersion === 1 ? 0 : 1);
       const send = (clientMessageId: string) =>
         app.inject({

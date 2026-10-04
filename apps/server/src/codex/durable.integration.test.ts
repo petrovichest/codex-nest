@@ -293,6 +293,7 @@ describe.skipIf(!binary)("real Codex delivery", () => {
         threadId: thread.id,
         gitInfo: { sha: null },
       });
+      await first.rpc.request("thread/read", { threadId: thread.id, includeTurns: true });
       const store = new StateStore(join(directory, "nest-state.json"));
       await store.load();
       const request = vi.fn((method: string, params: unknown) => first.rpc.request(method, params));
@@ -352,6 +353,46 @@ describe.skipIf(!binary)("real Codex delivery", () => {
   );
 
   const it = test.skipIf(!nativeBinary);
+
+  test.skipIf(!compatibleBinary)(
+    "persists an empty thread for Team and accepts its first message once after restart",
+    async () => {
+      const first = await connect();
+      const created = await start(first.rpc);
+      await first.rpc.request("thread/metadata/update", {
+        threadId: created.thread.id,
+        gitInfo: { sha: null },
+      });
+      const prepared = await first.rpc.request<{
+        thread: { id: string; path: string; turns: unknown[]; name: string | null };
+      }>("thread/read", { threadId: created.thread.id, includeTurns: true });
+      expect(prepared.thread).toMatchObject({ id: created.thread.id, turns: [], name: null });
+      await expect(access(prepared.thread.path)).resolves.toBeUndefined();
+      const params = {
+        threadId: created.thread.id,
+        excludeTurns: true,
+        config: { agents: { enabled: false } },
+      };
+      const enabled = await first.rpc.request<{ thread: { id: string } }>("thread/resume", params);
+      expect(enabled.thread.id).toBe(created.thread.id);
+      expect(modelRequests).toBe(0);
+      await kill(first.child);
+      const second = await connect();
+      const resumed = await second.rpc.request<{ thread: { id: string } }>("thread/resume", params);
+      expect(resumed.thread.id).toBe(created.thread.id);
+      expect(modelRequests).toBe(0);
+      await complete(second.rpc, () =>
+        second.rpc.request("turn/start", input(created.thread.id, "first-team-message")),
+      );
+      expect(modelRequests).toBe(1);
+      const history = await second.rpc.request<{ thread: { turns: unknown[] } }>("thread/read", {
+        threadId: created.thread.id,
+        includeTurns: true,
+      });
+      expect(history.thread.turns).toHaveLength(1);
+    },
+    90_000,
+  );
 
   it("keeps a newly created empty thread after SIGKILL and replays its creation", async () => {
     const creationId = randomUUID();

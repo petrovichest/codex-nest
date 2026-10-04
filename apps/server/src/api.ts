@@ -622,15 +622,18 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       try {
         await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
       } catch (error) {
-        if (!projection.isUnmaterialized(threadId) || !isMissingRolloutError(error)) {
+        if (
+          !projection.canMaterializeEmptySession(threadId) ||
+          !(error instanceof RpcError) ||
+          error.code !== -32_600 ||
+          ![
+            `no rollout found for thread id ${threadId}`,
+            `invalid paginated history lineage for ${threadId}: missing source rollout`,
+          ].includes(error.message)
+        ) {
           throw error;
         }
-        // Codex does not persist an empty thread until its first durable metadata update.
-        // Materialize the rollout without starting a model turn or assigning a fake title.
-        await bridge.request("thread/metadata/update", {
-          threadId,
-          gitInfo: { sha: null },
-        });
+        await projection.materializeEmptySession(threadId);
         await bridge.request<ThreadResumeResponse>("thread/resume", resumeParams, 30_000);
       }
     }
@@ -946,11 +949,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
         const existing = projection.summary(previous.threadId);
         if (existing) {
           if (projection.isUnmaterialized(existing.id)) {
-            await bridge.request("thread/metadata/update", {
-              threadId: existing.id,
-              gitInfo: { sha: null },
-            });
-            await projection.markMaterialized(existing.id);
+            await projection.materializeEmptySession(existing.id);
           }
           return existing;
         }
@@ -990,11 +989,7 @@ export function registerApi(app: FastifyInstance, services: ApiServices): void {
       });
       await markRootToolsAvailable(store, started.thread.id);
       if (bridge.deliveryVersion !== 1) {
-        await bridge.request("thread/metadata/update", {
-          threadId: started.thread.id,
-          gitInfo: { sha: null },
-        });
-        await projection.markMaterialized(started.thread.id);
+        await projection.materializeEmptySession(started.thread.id);
       }
       // Both receivers now have a persisted empty thread before the first message.
       return projection.setSettings(started.thread.id, prepared.settings ?? settings);

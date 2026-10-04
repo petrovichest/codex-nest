@@ -1494,12 +1494,61 @@ export class AppProjection extends EventEmitter {
     );
   }
 
-  async markMaterialized(threadId: string): Promise<void> {
+  canMaterializeEmptySession(threadId: string): boolean {
+    const cached = this.threads.get(threadId);
+    const state = this.store.view();
+    const meta = state.threadMeta[threadId];
+    const summary = cached ? this.toSummary(cached, state) : undefined;
+    return Boolean(
+      cached &&
+      summary?.projectId &&
+      summary.relation.kind === "session" &&
+      !cached.archived &&
+      !cached.currentTurnId &&
+      !cached.thread.turns.length &&
+      !cached.thread.preview.trim() &&
+      !cached.thread.forkedFromId &&
+      !meta?.logicalFork &&
+      !meta?.lastOutcome &&
+      !meta?.lastResult &&
+      !meta?.teamOrchestration &&
+      meta?.managedTeamToolsAvailable &&
+      meta.sessionArtifactsVersion === 1 &&
+      Object.values(state.threadCreations ?? {}).some(
+        (creation) => creation.threadId === threadId,
+      ) &&
+      !Object.values(state.messageReceipts ?? {}).some(
+        (receipt) =>
+          receipt.threadId === threadId &&
+          receipt.status !== "rejected" &&
+          receipt.status !== "canceled",
+      ),
+    );
+  }
+
+  async materializeEmptySession(threadId: string): Promise<void> {
+    const cached = this.threads.get(threadId);
+    if (!cached) throw new Error("Thread not found");
+    // Initialize stored metadata before reading history. Paginated metadata
+    // updates do not persist the rollout, but an empty history read does.
+    await this.bridge.request(
+      "thread/metadata/update",
+      { threadId, gitInfo: { sha: cached.thread.gitInfo?.sha ?? null } },
+      30_000,
+    );
+    await this.bridge.request("thread/read", { threadId, includeTurns: true }, 30_000);
+    await this.markMaterialized(threadId, { preserveDraft: true });
+  }
+
+  async markMaterialized(
+    threadId: string,
+    options: { preserveDraft?: boolean } = {},
+  ): Promise<void> {
     this.unmaterializedThreads.delete(threadId);
     await this.store.update((state) => {
       const meta = state.threadMeta[threadId] ?? { pinned: false, lastReadUpdatedAt: 0 };
       meta.unmaterialized = false;
-      delete meta.draft;
+      if (!options.preserveDraft) delete meta.draft;
       state.threadMeta[threadId] = meta;
     });
   }
