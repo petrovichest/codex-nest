@@ -1,9 +1,15 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { installDocsFixture, report } from "../docs/fixtures";
 import { waitForVisualReady } from "./fixtures";
+
+const serverContentSecurityPolicy = readFileSync(
+  resolve(import.meta.dirname, "../../../server/src/app.ts"),
+  "utf8",
+).match(/"Content-Security-Policy",\s*"([^"]+)"/u)![1]!;
 
 async function openReport(page: Page) {
   await page.goto("/threads/session-main");
@@ -12,6 +18,123 @@ async function openReport(page: Page) {
   await inspector.getByRole("tab", { name: /^Artifacts/u }).click();
   await inspector.getByRole("button", { name: "Open project-search.md" }).click();
   return page.locator(".artifact-viewer");
+}
+
+for (const width of [390, 1440]) {
+  test.describe(`HTML viewer at ${width}px`, () => {
+    test.use({ viewport: { width, height: 1000 }, hasTouch: width <= 820 });
+
+    test("preserves report styles under the server CSP while isolating active and remote content", async ({
+      page,
+    }) => {
+      await installDocsFixture(page, "light");
+      const html = `<!doctype html><html lang="ru"><head>
+        <meta charset="utf-8">
+        <style>
+          @import url("https://artifact-preview.invalid/import.css");
+          body { margin: 0; font: 15px/1.6 system-ui, sans-serif; color: #182622; }
+          main { padding: 24px; }
+          h1 { font-size: 34px; }
+          .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+          .card { padding: 20px; background: #f4f5f1; }
+          .scroll { overflow-x: auto; }
+          table { border-collapse: collapse; font-size: 13px; }
+          td { min-width: 80px; padding: 8px 10px; white-space: nowrap; }
+          .remote { background-image: url("https://artifact-preview.invalid/background.png"); }
+        </style>
+        <script>parent.document.body.dataset.artifactScript = "executed";</script>
+        </head><body><main>
+        <h1>282 сделки · 288 вариантов выхода</h1>
+        <div class="cards"><div class="card">281 / 282</div><div class="card">288</div></div>
+        <div class="scroll"><table><tbody><tr>${"<td>+19.814 SOL</td>".repeat(16)}</tr></tbody></table></div>
+        <p class="inline" style="background: rgb(31, 143, 106)">Цвет матрицы</p>
+        <div class="remote">Remote resources are blocked</div>
+        <img src="https://artifact-preview.invalid/tracker.png">
+        <button onclick="parent.document.body.dataset.artifactScript = 'executed'">Action</button>
+        <iframe src="https://artifact-preview.invalid/frame"></iframe>
+        <form action="https://artifact-preview.invalid/submit"><input></form>
+        </main></body></html>`;
+      const remoteRequests: string[] = [];
+      await page.route("https://artifact-preview.invalid/**", (route) => {
+        remoteRequests.push(route.request().url());
+        return route.abort();
+      });
+      await page.route("**/api/v1/threads/session-main/artifacts", (route) =>
+        route.fulfill({
+          headers: { "access-control-allow-origin": "*" },
+          json: {
+            capability: "explicit",
+            artifacts: [
+              {
+                id: "html-report",
+                label: "HTML report",
+                path: "/work/launchpad/report.html",
+                relativePath: "report.html",
+                fileName: "report.html",
+                turnId: "turn-main",
+                createdAt: Date.now(),
+              },
+            ],
+          },
+        }),
+      );
+      await page.route("**/api/v1/threads/session-main/downloads", (route) =>
+        route.fulfill({
+          headers: { "access-control-allow-origin": "*" },
+          json: {
+            downloadUrl: "/downloads/report.html",
+            fileName: "report.html",
+            size: new TextEncoder().encode(html).byteLength,
+            expiresAt: Date.now() + 60_000,
+          },
+        }),
+      );
+      await page.route("**/downloads/report.html", (route) =>
+        route.fulfill({ contentType: "text/html; charset=utf-8", body: html }),
+      );
+
+      await page.goto("/threads/session-main");
+      await waitForVisualReady(page);
+      // Vite injects the app's CSS inline. Apply the actual server policy after it
+      // loads so the report inherits production restrictions without breaking Vite.
+      await page.evaluate((policy) => {
+        const meta = document.createElement("meta");
+        meta.httpEquiv = "Content-Security-Policy";
+        meta.content = policy;
+        document.head.append(meta);
+      }, serverContentSecurityPolicy);
+      await page.getByRole("button", { name: "Show details", exact: true }).click();
+      const inspector = page.getByRole("complementary", { name: "Task details" });
+      await inspector.getByRole("tab", { name: /^Artifacts/u }).click();
+      await inspector.getByRole("button", { name: "Open report.html" }).click();
+
+      const iframe = page.locator(".artifact-html-frame");
+      await expect(iframe).toHaveAttribute("sandbox", "");
+      const report = page.frameLocator(".artifact-html-frame");
+      await expect(report.getByRole("heading")).toHaveText("282 сделки · 288 вариантов выхода");
+      await expect(report.locator("body")).toHaveCSS("font-size", "15px");
+      await expect(report.locator("body")).toHaveCSS("color", "rgb(24, 38, 34)");
+      await expect(report.locator("h1")).toHaveCSS("font-size", "34px");
+      await expect(report.locator(".cards")).toHaveCSS("display", "flex");
+      await expect(report.locator(".cards")).toHaveCSS("gap", "16px");
+      await expect(report.locator(".inline")).toHaveCSS("background-color", "rgb(31, 143, 106)");
+      const scroll = report.locator(".scroll");
+      await expect(scroll).toHaveCSS("overflow-x", "auto");
+      expect(await scroll.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+      expect(await report.locator("body").evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(
+        true,
+      );
+      await scroll.evaluate((el) => {
+        el.scrollLeft = 100;
+      });
+      expect(await scroll.evaluate((el) => el.scrollLeft)).toBe(100);
+      await expect(report.locator("script, iframe, form, [onclick]")).toHaveCount(0);
+      await report.getByRole("button", { name: "Action" }).click();
+      expect(await page.locator("body").getAttribute("data-artifact-script")).toBeNull();
+      expect(await iframe.evaluate((el) => (el as HTMLIFrameElement).contentDocument)).toBeNull();
+      expect(remoteRequests).toEqual([]);
+    });
+  });
 }
 
 for (const theme of ["light", "dark"] as const) {
