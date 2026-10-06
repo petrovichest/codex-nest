@@ -2,6 +2,34 @@
 
 <p align="center">English · <a href="./README.ru.md">Русский</a></p>
 
+> **Deprecated.** CodexNest has evolved into [Nest Apps](https://github.com/petrovichest/nest-apps).
+> Further development continues there. This repository is retained for reference.
+
+## Switching to Nest Apps
+
+For a standard installation made with `install.sh`, run these commands as the
+same Linux user who installed CodexNest:
+
+```bash
+sed -i \
+  -e 's|petrovichest/codex-nest|petrovichest/nest-apps|g' \
+  -e 's|android-latest/CodexNest-latest.json|rolling-latest/NestApps-latest.json|g' \
+  "$HOME/.local/bin/codexnest"
+
+git -C "${CODEXNEST_ROOT:-$HOME/.local/share/codexnest}/source" \
+  remote set-url origin https://github.com/petrovichest/nest-apps.git
+
+codexnest check-update
+```
+
+This switches the updater and Git source to Nest Apps without reinstalling or
+restarting anything. Projects, conversations, settings and authentication stay
+in place; the running build is unchanged until you apply an update.
+
+To install the new build, open **Settings → Maintenance → Check for updates →
+Update**. Applying the update briefly restarts only the CodexNest application;
+in daemon mode, the Codex daemon keeps running. No computer reboot is needed.
+
 <p align="center">
   <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: the same project search session on desktop and mobile" /></a>
 </p>

@@ -2,6 +2,35 @@
 
 <p align="center"><a href="./README.md">English</a> · Русский</p>
 
+> **Репозиторий устарел.** CodexNest получил продолжение в [Nest Apps](https://github.com/petrovichest/nest-apps).
+> Дальнейшее развитие проекта продолжается там. Этот репозиторий сохранён для справки.
+
+## Переход на Nest Apps
+
+Для стандартной установки через `install.sh` выполните команды от того же
+Linux-пользователя, который установил CodexNest:
+
+```bash
+sed -i \
+  -e 's|petrovichest/codex-nest|petrovichest/nest-apps|g' \
+  -e 's|android-latest/CodexNest-latest.json|rolling-latest/NestApps-latest.json|g' \
+  "$HOME/.local/bin/codexnest"
+
+git -C "${CODEXNEST_ROOT:-$HOME/.local/share/codexnest}/source" \
+  remote set-url origin https://github.com/petrovichest/nest-apps.git
+
+codexnest check-update
+```
+
+Это переключает updater и Git source на Nest Apps без переустановки и
+перезапусков. Проекты, диалоги, настройки и авторизация сохраняются; работающий
+билд остаётся прежним до применения обновления.
+
+Чтобы установить новый билд, откройте **Настройки → Обслуживание → Проверить
+обновления → Обновить**. Применение обновления кратко перезапускает только
+приложение CodexNest; в daemon-режиме Codex daemon продолжает работать.
+Перезагрузка компьютера не требуется.
+
 <p align="center">
   <a href="./docs/assets/cover.png"><img src="./docs/assets/cover.png" width="1600" alt="CodexNest: одна сессия с поиском по проектам на компьютере и телефоне" /></a>
 </p>
